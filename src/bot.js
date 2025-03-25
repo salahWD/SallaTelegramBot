@@ -1,5 +1,3 @@
-// const { waitForVerificationCode, forwardSteamLoginEmail } = require("./email");
-
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
 const fs = require("fs").promises;

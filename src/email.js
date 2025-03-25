@@ -3,8 +3,8 @@ require("dotenv").config();
 
 // Define OAuth2 client with your Gmail API credentials
 const oauth2Client = new google.auth.OAuth2(
-  process.env.GMAIL_CLIENT_ID, // From Google Cloud Console
-  process.env.GMAIL_CLIENT_SECRET, // From Google Cloud Console
+  process.env.GMAIL_CLIENT_ID,
+  process.env.GMAIL_CLIENT_SECRET,
   process.env.GMAIL_REDIRECT_URI + "/oauth2callback" // Must match redirect URI in Google Cloud
 );
 
@@ -12,6 +12,7 @@ const oauth2Client = new google.auth.OAuth2(
 const authUrl = oauth2Client.generateAuthUrl({
   access_type: "offline", // Ensures you get a refresh_token
   scope: ["https://www.googleapis.com/auth/gmail.readonly"], // Read-only access to Gmail
+  state: "user1@gmail.com", // Change for each email
 });
 
 console.log("Authorize Gmail here:", authUrl);
