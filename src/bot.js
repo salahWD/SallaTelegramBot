@@ -1,15 +1,18 @@
+const stopCodeVerification = true;
+
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
 const fs = require("fs").promises;
 const path = require("path");
 const axios = require("axios");
+const XLSX = require("xlsx"); // For reading Excel files
 require("dotenv").config();
 const { google } = require("googleapis");
 
 const app = express();
 const PORT = 4200;
 const TOKENS_FILE = path.join(__dirname, "tokens.json");
-const GMAIL_TOKENS_FILE = path.join(__dirname, "gmail_tokens.json");
+const EXCEL_FILE = path.join(__dirname, "../emails_and_usernames.xlsx");
 
 app.use(express.json());
 
@@ -54,55 +57,68 @@ const initializeTokens = async () => {
 
 // ======================= GMAIL TOKENS START =======================
 
-const storeGmailTokens = async (gmailTokens) => {
+const storeGmailTokens = async (gmailTokens, email) => {
+  const filePath = path.join(__dirname, `gmail_tokens_${email}.json`);
   try {
-    await fs.writeFile(
-      GMAIL_TOKENS_FILE,
-      JSON.stringify(gmailTokens, null, 2),
-      "utf8"
-    );
-    console.log("Gmail tokens stored in gmail_tokens.json");
+    await fs.writeFile(filePath, JSON.stringify(gmailTokens, null, 2), "utf8");
+    console.log(`Gmail tokens stored for ${email}`);
   } catch (error) {
-    console.error("Error storing Gmail tokens:", error.message);
+    console.error(`Error storing Gmail tokens for ${email}:`, error.message);
   }
 };
 
-const loadGmailTokens = async () => {
+const loadGmailTokens = async (email) => {
+  console.log(email);
+  const filePath = path.join(__dirname, `gmail_tokens_${email}.json`);
+  console.log(filePath);
   try {
-    const data = await fs.readFile(GMAIL_TOKENS_FILE, "utf8");
+    const data = await fs.readFile(filePath, "utf8");
     return JSON.parse(data);
   } catch (error) {
     if (error.code === "ENOENT") return null;
-    console.error("Error loading Gmail tokens:", error.message);
+    console.error(`Error loading Gmail tokens for ${email}:`, error.message);
     return null;
   }
 };
 
-let gmailTokens = null;
-const initializeGmailTokens = async () => {
-  gmailTokens = await loadGmailTokens();
+// Load Excel file and map usernames to emails
+const loadEmailUsernameMap = async () => {
+  const workbook = XLSX.readFile(EXCEL_FILE);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const data = XLSX.utils.sheet_to_json(sheet);
+
+  const emailUsernameMap = new Map();
+  data.forEach((row) => {
+    const email = row.Email;
+    const usernames = row.Username.split(",").map((u) => u.trim());
+    usernames.forEach((username) => {
+      if (!emailUsernameMap.has(username)) {
+        // First match only
+        emailUsernameMap.set(username, email);
+      }
+    });
+  });
+  return emailUsernameMap;
 };
 
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GMAIL_CLIENT_ID,
-  process.env.GMAIL_CLIENT_SECRET,
-  "http://localhost:4200/oauth2callback"
-);
-
-const getGmailClient = async () => {
-  if (!gmailTokens) await initializeGmailTokens();
-  if (!gmailTokens) throw new Error("Gmail tokens not initialized");
-  oauth2Client.setCredentials(gmailTokens);
+// Get Gmail client for a specific email
+const getGmailClient = async (email) => {
+  const tokens = await loadGmailTokens(email);
+  if (!tokens) throw new Error(`No Gmail tokens for ${email}`);
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET,
+    process.env.GMAIL_REDIRECT_URI + "/oauth2callback"
+  );
+  oauth2Client.setCredentials(tokens);
   return google.gmail({ version: "v1", auth: oauth2Client });
 };
 
-// Function to wait for and fetch the verification code
-const fetchVerificationCode = async (username, chatId, bot) => {
-  const gmail = await getGmailClient();
-  let lastCheckedTime = Date.now() / 1000; // Convert to seconds for Gmail API
-
-  // Poll Gmail every 5 seconds for up to 5 minutes
-  const maxWaitTime = 5 * 60 * 1000; // 5 minutes in milliseconds
+// Fetch verification code from a specific Gmail account
+const fetchVerificationCode = async (username, email, chatId, bot) => {
+  const gmail = await getGmailClient(email);
+  let lastCheckedTime = Date.now() / 1000;
+  const maxWaitTime = 5 * 60 * 1000; // 5 minutes
   const pollInterval = 5 * 1000; // 5 seconds
   const startTime = Date.now();
 
@@ -122,11 +138,10 @@ const fetchVerificationCode = async (username, chatId, bot) => {
           format: "full",
         });
 
-        // Get message timestamp
-        const messageTime = parseInt(message.data.internalDate) / 1000; // Convert to seconds
+        const messageTime = parseInt(message.data.internalDate) / 1000;
         if (messageTime <= lastCheckedTime) {
           await new Promise((resolve) => setTimeout(resolve, pollInterval));
-          continue; // Skip if older than last check
+          continue;
         }
 
         let emailBody;
@@ -142,21 +157,18 @@ const fetchVerificationCode = async (username, chatId, bot) => {
           ).toString("utf8");
         }
 
-        // Check if email starts with the username
         if (emailBody.startsWith(`${username},`)) {
-          const codeMatch = emailBody.match(/^[A-Z0-9]{5}$/m);
-          if (codeMatch) {
-            return codeMatch[0]; // Return the code (e.g., 9KPWQ)
-          }
+          const codeMatch = emailBody.match(/^[A-Z0-9]{3,7}$/m);
+          if (codeMatch) return codeMatch[0];
           return "لم أتمكن من استخراج رمز التحقق.";
         }
+      } else {
       }
 
-      // Update last checked time if no new email
       lastCheckedTime = Date.now() / 1000;
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
     } catch (error) {
-      console.error("Error polling Gmail:", error.message);
+      console.error(`Error polling Gmail for ${email}:`, error.message);
       return "خطأ أثناء جلب رمز التحقق.";
     }
   }
@@ -181,34 +193,18 @@ app.post("/webhook", async (req, res) => {
   res.status(200).json({ message: "Webhook received" });
 });
 
-app.get("/checkorder/:orderNumber", async (req, res) => {
-  const orderNumber = req.params.orderNumber;
-  const tokens = await loadTokens();
-  if (!tokens || !tokens.access_token) {
-    return res.status(500).json({ error: "No valid Salla token" });
-  }
-  try {
-    const response = await axios.get(
-      `https://api.salla.dev/admin/v2/orders/${orderNumber}`,
-      { headers: { Authorization: `Bearer ${tokens.access_token}` } }
-    );
-    const status = response.data?.data?.status || "unknown";
-    res.json({ orderNumber, status });
-  } catch (error) {
-    res.status(500).json({
-      error: "Failed to check order",
-      details: error.response?.data || error.message,
-    });
-  }
-});
-
 app.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
+  const email = req.query.state; // Pass email as state (e.g., user1@gmail.com)
   try {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GMAIL_CLIENT_ID,
+      process.env.GMAIL_CLIENT_SECRET,
+      process.env.GMAIL_REDIRECT_URI + "/oauth2callback"
+    );
     const { tokens } = await oauth2Client.getToken(code);
-    gmailTokens = tokens;
-    await storeGmailTokens(tokens);
-    res.send("Gmail authentication successful.");
+    await storeGmailTokens(tokens, email);
+    res.send(`Gmail authentication successful for ${email}.`);
   } catch (error) {
     res.status(500).send("Gmail authentication failed.");
   }
@@ -216,7 +212,6 @@ app.get("/oauth2callback", async (req, res) => {
 
 const startServer = async () => {
   await initializeTokens();
-  await initializeGmailTokens();
   app.listen(PORT, () =>
     console.log(`Server running on http://localhost:${PORT}`)
   );
@@ -241,7 +236,7 @@ bot.onText(/\/start/, (msg) => {
   bot.sendMessage(chatId, introMessage);
 });
 
-bot.onText(/\/code/, (msg) => {
+bot.onText(/\/code/, async (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, "⏳ أنا في انتظار الكود الخاص بالطلب. أرسله الآن!");
 
@@ -259,13 +254,16 @@ bot.onText(/\/code/, (msg) => {
     }
 
     try {
-      const response = await axios.get(
-        `https://api.salla.dev/admin/v2/orders/${orderId}`,
-        { headers: { Authorization: `Bearer ${tokens.access_token}` } }
-      );
-      const statusName = response.data?.data?.status?.name || "غير معروف";
+      const response = stopCodeVerification
+        ? ""
+        : await axios.get(`https://api.salla.dev/admin/v2/orders/${orderId}`, {
+            headers: { Authorization: `Bearer ${tokens.access_token}` },
+          });
+      const statusName = stopCodeVerification
+        ? ""
+        : response.data?.data?.status?.name || "غير معروف";
 
-      if (statusName === "تم التنفيذ") {
+      if (statusName === "تم التنفيذ" || stopCodeVerification) {
         bot.sendMessage(
           chatId,
           `✅ الطلب (${orderId}) مكتمل. الرجاء إدخال اسم المستخدم الخاص بك (مثل mahatm121):`
@@ -273,13 +271,24 @@ bot.onText(/\/code/, (msg) => {
 
         bot.once("message", async (usernameMsg) => {
           const username = usernameMsg.text.trim();
+          const emailUsernameMap = await loadEmailUsernameMap();
+          const email = emailUsernameMap.get(username);
+
+          if (!email) {
+            bot.sendMessage(
+              chatId,
+              `❌ لا يوجد بريد إلكتروني مرتبط بـ ${username}.`
+            );
+            return;
+          }
+
           bot.sendMessage(
             chatId,
-            `⏳ أنتظر بريدًا إلكترونيًا جديدًا لـ ${username}...`
+            `⏳ أنتظر بريدًا إلكترونيًا جديدًا لـ ${username} على ${email}...`
           );
-
           const verificationCode = await fetchVerificationCode(
             username,
+            email,
             chatId,
             bot
           );

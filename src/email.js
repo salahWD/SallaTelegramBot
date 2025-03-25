@@ -12,7 +12,8 @@ const oauth2Client = new google.auth.OAuth2(
 const authUrl = oauth2Client.generateAuthUrl({
   access_type: "offline", // Ensures you get a refresh_token
   scope: ["https://www.googleapis.com/auth/gmail.readonly"], // Read-only access to Gmail
-  state: "user1@gmail.com", // Change for each email
+  // state: "salahb170@gmail.com", // Change for each email
+  state: "1rtrabrs01@gmail.com",
 });
 
 console.log("Authorize Gmail here:", authUrl);
