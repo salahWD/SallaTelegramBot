@@ -1,4 +1,4 @@
-const stopCodeVerification = true;
+const stopCodeVerification = false;
 
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
@@ -254,6 +254,7 @@ bot.onText(/\/code/, async (msg) => {
     }
 
     try {
+      console.log(`Bearer ${tokens.access_token}`);
       const response = stopCodeVerification
         ? ""
         : await axios.get(`https://api.salla.dev/admin/v2/orders/${orderId}`, {
